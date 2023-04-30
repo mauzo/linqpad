@@ -1,6 +1,6 @@
 <Query Kind="Program">
-  <Reference Relative="rx\pub\rx.dll">C:\Users\Ben\Desktop\src\cs\rx\pub\rx.dll</Reference>
-  <Reference Relative="rx\pub\System.Reactive.dll">C:\Users\Ben\Desktop\src\cs\rx\pub\System.Reactive.dll</Reference>
+  <Reference Relative="..\rx\pub\rx.dll">C:\Users\Ben\Desktop\src\cs\rx\pub\rx.dll</Reference>
+  <Reference Relative="..\rx\pub\System.Reactive.dll">C:\Users\Ben\Desktop\src\cs\rx\pub\System.Reactive.dll</Reference>
 </Query>
 
 using System.Reactive;
@@ -32,6 +32,8 @@ async Task<Result> _MakeRequest<Result>(string method, string path, string token
 	var req = new HttpRequestMessage(new HttpMethod(method), url);
 	
 	$"Request [{id}]: {url} ({token})".Dump();
+	//if (path == "/token")
+		//new StackTrace(true).ToString().Dump(id.ToString());
 	
 	if (token != null)
 		req.Headers.Add("Authorization", $"Bearer {token}");
@@ -54,25 +56,65 @@ async Task<Result> _MakeRequest<Result>(string method, string path, string token
 IObservable<Result> MakeRequest<Result> (string method, string path, string token)
 	=> _MakeRequest<Result>(method, path, token).ToObservable();
 	
-IObservable<string> GetToken (string bad = null)
+IObservable<string> NewToken (string bad)
 {
 	tokenRequest.OnNext(bad);
 	return token;
 }
 
 IObservable<Result> RequestWithToken<Result> (string method, string path)
-	=> GetToken()
+	=> token
 		.SelectMany(tok => MakeRequest<Result>(method, path, tok))
 		//.RetryWhen(exs => exs.Case<Exception, string>(sel => sel
 		//	.When<TokenFailed>(tf => GetToken(tf.Token))
 		//	.Else(ex => Observable.Throw<string>(ex))));
-		.RetryWhen(exs => exs.SelectMany(ex =>
-			ex is TokenFailed	? GetToken(((TokenFailed)ex).Token)
-				: Observable.Throw<string>(ex)));
+		.RetryWhen(exs => exs.SelectMany(ex => {
+			switch (ex) {
+			case TokenFailed tf:	return NewToken(tf.Token);
+			default:				return Observable.Throw<string>(ex);
+			}
+		}));
 	
 class NamedAction {
 	public string Name { get; init; }
 	public Func<IObservable<string>> Action { get; init; }
+}
+
+void SetupTokenSequence ()
+{
+	IObservable<string> _tokenSource = null;
+	var tokenSource = Observable.Defer(() => _tokenSource)
+		.Replay(1);
+		
+	/* We publish null when we have a token request pending. This
+	   Where will cause new subscriptions to the token sequence to
+	   pause until we have a new token. */
+	token = tokenSource
+		.Where(t => t != null)
+		.Take(1);
+		
+	tokenRequest = new();
+	var newToken = tokenRequest
+		.WithLatestFrom(tokenSource, (bad, cur) => new { cur, bad })
+		.Where(t => t.cur == t.bad)
+		.Select(t => t.cur)
+		.DistinctUntilChanged()
+		.Select(_ => Unit.Default)
+		.StartWith(Unit.Default);
+		
+	_tokenSource = newToken
+		.SelectMany(_ => Observable.Return<string>(null)
+			.Concat(MakeRequest<string>("POST", "/token", null)));
+	
+	//newToken.Connect();
+	"Dumping sequences".Dump();
+	tokenSource.Dump("tokenSource");
+	//token.Dump("token");
+	//tokenRequest.Dump("tokenRequest");
+	//newToken.Dump("newToken");
+	
+	"Connecting tokenSource".Dump();
+	tokenSource.Connect();
 }
 
 IObservable<int> RunActions ()
@@ -88,38 +130,23 @@ void Main()
 	client = new HttpClient();
 	baseUrl = new Uri("http://localhost:3000");
 	
-	IObservable<bool> newToken = null;
-	var tokenSource = Observable.Defer(() => newToken)
-		.SelectMany(_ => 
-			Observable.Return<string>(null)
-				.Concat(MakeRequest<string>("POST", "/token", null)))
-		.Publish(null);
-	token = tokenSource
-		.Where(t => t != null)
-		.Take(1);
-	//tokenSource.Dump();
-	
-	tokenRequest = new();
-	newToken = Observable.Create<string>(obs => {
-			$"Observer for newToken: {new StackTrace(true)}".Dump();
-			return tokenRequest.Subscribe(obs);
-		})
-		.Do(r => $"Token request: {r}".Dump())
-		.DistinctUntilChanged()
-		.SelectMany(req =>
-			tokenSource.Take(1).Select(tok => new { req = req, tok = tok }))
-		.Select(comb => comb.req == comb.tok)
-		.Where(ok => ok);
-		//.Publish();
-	//tokenRequest.Dump();
-		
-	tokenSource.Connect();
-	//newToken.Connect();
+	SetupTokenSequence();
 	
 	var acts = RunActions();
 	acts.Dump();
 	acts.Dump();
 	RunActions().Dump();
+	
+	//Observable.Return(Unit.Default)
+	//	.Delay(TimeSpan.FromSeconds(2))
+	//	.SelectMany(_ => token)
+	//	.Do(t => $"First token: {t}".Dump())
+	//	.SelectMany(t => {
+	//		tokenRequest.OnNext(t);
+	//		return token;
+	//	})
+	//	.Do(t => $"Second token: {t}".Dump())
+	//	.Dump("eval");
 }
 
 
